@@ -9,7 +9,7 @@ if not exist package.json (
 )
 
 echo [+] Installing dependencies...
-npm install discord.js-selfbot-v13 ws uuid debug
+npm install discord.js axios
 
 echo [+] Installation completed!
 pause
