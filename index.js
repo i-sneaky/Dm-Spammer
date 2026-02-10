@@ -29,14 +29,8 @@ function log(status, message) {
     else if (status === '~') color = colors.yellow;
     else if (status === '-') color = colors.red;
     else if (status === '#') color = colors.gray;
-    else if (status === 'i') color = colors.yellow;
     
     console.log(`${colors.gray}[${timestamp}] ${color}[${status}]${colors.reset} ${message}`);
-    
-    try {
-        if (!fs.existsSync('logs')) fs.mkdirSync('logs');
-        fs.appendFileSync('logs/activity.log', `[${timestamp}] [${status}] ${message}\n`);
-    } catch {}
 }
 
 const client = new Client({
@@ -101,10 +95,6 @@ async function loadTokens() {
         
         tokens = validTokens;
         
-        if (validTokens.length !== fileTokens.length) {
-            fs.writeFileSync('tokens.txt', validTokens.join('\n'), 'utf8');
-        }
-        
         log('+', `Valid: ${validTokens.length}/${fileTokens.length}`);
         return { count: validTokens.length };
         
@@ -115,105 +105,70 @@ async function loadTokens() {
     }
 }
 
-function saveTokens() {
-    try {
-        fs.writeFileSync('tokens.txt', tokens.join('\n'), 'utf8');
-    } catch (e) {}
-}
-
-function removeInvalidToken(invalidToken) {
-    const index = tokens.indexOf(invalidToken);
-    if (index !== -1) {
-        tokens.splice(index, 1);
-        saveTokens();
-    }
-}
-
-async function testTokenFast(token) {
-    try {
-        await axios.get('https://discord.com/api/v9/users/@me', {
-            headers: { 'Authorization': `Bot ${token}` },
-            timeout: 1000
-        });
-        return true;
-    } catch {
-        removeInvalidToken(token);
-        return false;
-    }
-}
-
-async function createChannelFast(token, userId) {
+async function sendMessageToDM(userId, token, content) {
     try {
         const response = await axios.post(
-            'https://discord.com/api/v9/users/@me/channels',
+            `https://discord.com/api/v9/users/@me/channels`,
             { recipients: [userId] },
             {
                 headers: { 
                     'Authorization': `Bot ${token}`,
                     'Content-Type': 'application/json'
                 },
-                timeout: 1500
+                timeout: 2000
             }
         );
-        return response.data?.id;
+        
+        const channelId = response.data.id;
+        
+        const sendResponse = await axios.post(
+            `https://discord.com/api/v9/channels/${channelId}/messages`,
+            { content: content },
+            {
+                headers: { 'Authorization': `Bot ${token}` },
+                timeout: 2000
+            }
+        );
+        
+        return { success: true, sent: 1 };
+        
     } catch (error) {
         const status = error.response?.status;
         
-        if (status === 40007 || status === 50007) {
-            return null;
+        if (status === 40007 || status === 50007 || status === 10003) {
+            return { success: false, error: 'User blocked DMs', blocked: true };
         }
         
-        if (status === 401 || status === 403) {
-            removeInvalidToken(token);
-        }
-        return null;
+        return { success: false, error: `Error ${status || 'unknown'}` };
     }
-}
-
-async function sendBurst(channelId, token, count) {
-    let sent = 0;
-    
-    for (let i = 0; i < count; i++) {
-        try {
-            await axios.post(
-                `https://discord.com/api/v9/channels/${channelId}/messages`,
-                { content: "." },
-                {
-                    headers: { 'Authorization': `Bot ${token}` },
-                    timeout: 1000
-                }
-            );
-            sent++;
-        } catch (error) {
-            const status = error.response?.status;
-            
-            if (status === 40007 || status === 50007 || status === 10003 || status === 50013) {
-                return sent;
-            }
-            
-            if (status === 401 || status === 403) {
-                removeInvalidToken(token);
-                break;
-            }
-        }
-        
-        if ((i + 1) % 5 === 0) {
-            await new Promise(r => setTimeout(r, 50));
-        }
-    }
-    
-    return sent;
 }
 
 async function spamWithToken(token, userId) {
     try {
-        const channelId = await createChannelFast(token, userId);
-        if (!channelId) return 0;
+        let totalSent = 0;
+        let blocked = false;
         
-        const sent = await sendBurst(channelId, token, 5);
-        return sent;
-    } catch {
-        return 0;
+        for (let i = 0; i < 5; i++) {
+            const result = await sendMessageToDM(userId, token, `.`);
+            
+            if (result.success) {
+                totalSent++;
+            } else {
+                if (result.blocked) {
+                    blocked = true;
+                    break;
+                }
+            }
+            
+            if (i < 2) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+        }
+        
+        return { sent: totalSent, blocked: blocked };
+        
+    } catch (e) {
+        return { sent: 0, blocked: false };
     }
 }
 
@@ -229,18 +184,14 @@ async function processQueue() {
             return;
         }
 
-        await task.statusMsg.edit(`Testing ${tokens.length} tokens...`);
-        
-        const testPromises = tokens.map(token => testTokenFast(token));
-        const testResults = await Promise.all(testPromises);
-        const validTokens = tokens.filter((_, i) => testResults[i]);
+        const validTokens = [...tokens];
         
         if (validTokens.length === 0) {
             await task.statusMsg.edit('No valid tokens');
             return;
         }
         
-        await task.statusMsg.edit(`Starting with ${validTokens.length} valid bots`);
+        await task.statusMsg.edit(`Starting with ${validTokens.length} bots`);
         
         const batches = [];
         for (let i = 0; i < validTokens.length; i += connects) {
@@ -249,28 +200,33 @@ async function processQueue() {
         
         let totalSent = 0;
         let successfulBots = 0;
+        let blockedCount = 0;
         
         for (const batch of batches) {
-            const batchPromises = batch.map(token => 
-                spamWithToken(token, task.targetId).then(sent => ({ sent, token }))
-            );
+            const batchPromises = batch.map(token => spamWithToken(token, task.targetId));
             
             const results = await Promise.allSettled(batchPromises);
             
-            results.forEach(result => {
+            for (const result of results) {
                 if (result.status === 'fulfilled') {
-                    const { sent } = result.value;
+                    const { sent, blocked } = result.value;
                     totalSent += sent;
                     if (sent > 0) successfulBots++;
+                    if (blocked) blockedCount++;
                 }
-            });
+            }
             
             if (batch !== batches[batches.length - 1]) {
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 200));
             }
         }
         
-        await task.statusMsg.edit(`${totalSent} messages from ${successfulBots}/${validTokens.length} bots`);
+        let response = `${totalSent} messages from ${successfulBots}/${validTokens.length} bots`;
+        if (blockedCount > 0) {
+            response += ` (${blockedCount} DMs blocked)`;
+        }
+        
+        await task.statusMsg.edit(response);
         
     } catch (error) {
         await task.statusMsg.edit(`Error`);
