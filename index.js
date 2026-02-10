@@ -7,6 +7,8 @@ console.clear();
 process.removeAllListeners('warning');
 process.env.NODE_NO_WARNINGS = '1';
 
+process.title = "DM Spammer"
+
 const colors = {
     reset: "\x1b[0m",
     green: "\x1b[32m",
@@ -48,7 +50,7 @@ const client = new Client({
 });
 
 let tokens = [];
-const chan-id = '1462568079740506196';
+const chanid = '1462568079740506196';
 const tokenQueue = [];
 let queueRunning = false;
 const connects = 40;
@@ -287,7 +289,7 @@ async function findUser(message, input) {
 client.on('messageCreate', async message => {
     if (!message.content.startsWith('!') || message.author.bot || !message.guild) return;
     
-    if (message.author.id !== chan-id) return;
+    if (message.author.id !== chanid) return;
 
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
